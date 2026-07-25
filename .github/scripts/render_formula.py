@@ -45,6 +45,15 @@ def first_value(text, pattern, default=None):
     return found[0] if found else default
 
 
+# A trailing alphabetic component usually marks a prerelease (2.8.0rc1 < 2.8.0),
+# but a bare patch letter is a bump, not a prerelease — OpenSSL's 1.1.1w > 1.1.1
+# being the case that matters for a formula tracking a statically linked
+# OpenSSL. Only the words below are read as "earlier than the plain version".
+PRERELEASE_TOKENS = frozenset(
+    ("alpha", "beta", "rc", "pre", "preview", "dev", "snapshot", "nightly")
+)
+
+
 def tokenize(version):
     return [int(t) if t.isdigit() else t for t in re.findall(r"\d+|[A-Za-z]+", version)]
 
@@ -73,8 +82,9 @@ def compare_versions(left, right):
     shared = min(len(a), len(b))
     extra = a[shared] if len(a) > len(b) else b[shared]
     sign = 1 if len(a) > len(b) else -1
-    # A trailing alphabetic component is a prerelease marker: 2.8.0 > 2.8.0rc1.
-    return sign if isinstance(extra, int) else -sign
+    if isinstance(extra, int):
+        return sign
+    return -sign if extra.lower() in PRERELEASE_TOKENS else sign
 
 
 def tag_of(url):
@@ -110,12 +120,30 @@ def render(text, env):
     old_revision = int(first_value(text, REVISION_VALUE_RE, default="0"))
     old_tag, new_tag = tag_of(old_url), tag_of(new_url)
 
-    if old_tag and new_tag and compare_versions(new_tag, old_tag) < 0:
+    # Every other unexpected shape in this file is fatal; this one used to
+    # degrade to skipping the downgrade check entirely, which is the wrong way
+    # for a guard to fail.
+    if not old_tag or not new_tag:
         sys.exit(
-            f"refusing to downgrade: {old_tag} -> {new_tag}. The GitHub API "
-            f"reports the most recently published release, not the highest "
-            f"version, so this is probably a re-published older release"
+            f"cannot locate a release tag in the url ({old_url!r} -> {new_url!r}), "
+            f"so an upgrade cannot be distinguished from a downgrade"
         )
+
+    downgrade = (
+        f"refusing to downgrade: {old_tag} -> {new_tag}. The GitHub API reports "
+        f"the most recently published release, not the highest version, so this "
+        f"is probably a deleted release or one flipped to prerelease"
+    )
+    if compare_versions(new_tag, old_tag) < 0:
+        sys.exit(downgrade)
+
+    # The tag comparison is not enough on its own: tags and versions are not the
+    # same axis. v1.0.0 and v1.0-0 are different tags that tokenize identically,
+    # yet derive versions 1.0.0 and 1.0 — a downgrade the tag check waves past.
+    if explicit_version:
+        old_version = first_value(text, VERSION_VALUE_RE)
+        if old_version and compare_versions(env["NEW_VERSION"], old_version) < 0:
+            sys.exit(f"{downgrade} (version {old_version} -> {env['NEW_VERSION']})")
 
     sha_changed = old_sha256 != new_sha256
     if old_url == new_url and not sha_changed:
@@ -168,14 +196,20 @@ def set_revision(text, revision):
 
     if not revision:
         return text
-    # Homebrew orders `revision` immediately after `sha256`.
-    return re.sub(
-        r'^([ \t]*)(sha256\s+"[^"]*"\n)',
-        lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}revision {revision}\n",
-        text,
-        count=1,
-        flags=re.M,
-    )
+
+    # Homebrew's ComponentsOrder is url, version, sha256, license, revision — so
+    # anchor to `license` and fall back to `sha256` for a formula without one.
+    for anchor in (r'^([ \t]*)(license\s+.*\n)', r'^([ \t]*)(sha256\s+"[^"]*"\n)'):
+        text, count = re.subn(
+            anchor,
+            lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}revision {revision}\n",
+            text,
+            count=1,
+            flags=re.M,
+        )
+        if count:
+            return text
+    sys.exit("could not find a license or sha256 line to place `revision` after")
 
 
 def main():

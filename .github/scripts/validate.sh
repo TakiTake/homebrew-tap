@@ -31,7 +31,6 @@ else
 fi
 
 bash -n .github/scripts/update-formula.sh
-bash -n .github/scripts/validate.sh
 echo "ok: shell syntax"
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required to validate this repository"

@@ -95,8 +95,20 @@ class TestRender(unittest.TestCase):
 
     def test_build_number_becomes_a_revision_line(self):
         out = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
-        lines = [line.strip() for line in out.splitlines()]
         self.assertEqual(revision_of(out), 1)
+
+    def test_revision_goes_after_license(self):
+        """Homebrew's ComponentsOrder is url, version, sha256, license, revision."""
+        out = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
+        lines = [line.strip() for line in out.splitlines()]
+        self.assertEqual(
+            lines.index("revision 1"), lines.index('license "GPL-2.0-only"') + 1
+        )
+
+    def test_revision_falls_back_to_sha256_without_a_license(self):
+        no_license = VERSIONED.replace('  license "GPL-2.0-only"\n', "")
+        out = render_formula.render(no_license, versioned("v2.7.5-1", "2.7.5", 1))
+        lines = [line.strip() for line in out.splitlines()]
         self.assertEqual(
             lines.index("revision 1"), lines.index(f'sha256 "{NEW_SHA}"') + 1
         )
@@ -217,7 +229,35 @@ class TestUpgradeOrdering(unittest.TestCase):
         self.assertIn("nothing to update", str(cm.exception))
 
 
+    def test_version_downgrade_is_refused_even_when_tags_tokenize_equal(self):
+        """v1.0.0 and v1.0-0 tokenize identically but derive different versions,
+        so the tag comparison alone waves the downgrade through."""
+        at_1_0_0 = VERSIONED.replace("v2.7.5-0", "v1.0.0").replace(
+            'version "2.7.5"', 'version "1.0.0"'
+        )
+        with self.assertRaises(SystemExit) as cm:
+            render_formula.render(at_1_0_0, versioned("v1.0-0", "1.0"))
+        self.assertIn("downgrade", str(cm.exception))
+
+    def test_unrecognisable_url_is_fatal_rather_than_unguarded(self):
+        """A url with no release tag used to disable the downgrade check."""
+        sourced = SIMPLE.replace(
+            "https://github.com/TakiTake/vpnp/releases/download/v0.1.0/vpnp-v0.1.0-aarch64-apple-darwin.tar.gz",
+            "https://example.com/archive/vpnp-0.1.0.tar.gz",
+        )
+        with self.assertRaises(SystemExit) as cm:
+            render_formula.render(sourced, env())
+        self.assertIn("release tag", str(cm.exception))
+
+
 class TestCompareVersions(unittest.TestCase):
+    def test_patch_letters_are_bumps_not_prereleases(self):
+        """OpenSSL-style: 1.1.1w is newer than 1.1.1, unlike 2.8.0rc1."""
+        self.assertEqual(render_formula.compare_versions("v1.1.1w", "v1.1.1"), 1)
+        self.assertEqual(render_formula.compare_versions("v2.7.5a", "v2.7.5"), 1)
+        self.assertEqual(render_formula.compare_versions("v2.8.0rc1", "v2.8.0"), -1)
+        self.assertEqual(render_formula.compare_versions("v2.8.0beta", "v2.8.0"), -1)
+
     def test_ordering(self):
         cases = [
             ("v2.7.5", "v2.7.4", 1),
@@ -342,7 +382,8 @@ class TestScriptGuards(unittest.TestCase):
             if not any(c in m for c in "/*")  # skip the `Formula/*.rb` glob loop
         ]
         self.assertEqual(len(loops), 1, "expected exactly one formula-name loop")
-        options = set(re.findall(r"^          - ([a-z0-9-]+)$", text, flags=re.M))
+        block = re.search(r"^\s+options:\n((?:\s+- \S+\n)+)", text, flags=re.M).group(1)
+        options = set(re.findall(r"- (\S+)", block))
         self.assertEqual(loops[0], self.script_table())
         self.assertEqual(options - {"all"}, self.script_table())
         self.assertIn("all", options)

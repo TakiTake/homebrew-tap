@@ -67,7 +67,7 @@ gh_api() {
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
-  curl -fsSL --retry 3 --retry-delay 2 \
+  curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "${auth[@]}" "$url"
@@ -122,13 +122,19 @@ print(sidecar)
 PY
 }
 
+# No pipe on purpose: `sed ... | head -1` would let head close the pipe early and
+# take the whole script down with SIGPIPE under `pipefail`.
 formula_field() {
-  sed -n "s/^[[:space:]]*$2[[:space:]]\{1,\}\"\(.*\)\"\$/\1/p" "$1" | head -1
+  local matches
+  matches="$(sed -n "s/^[[:space:]]*$2[[:space:]]\{1,\}\"\(.*\)\"\$/\1/p" "$1")"
+  printf '%s\n' "${matches%%$'\n'*}"
 }
 
 # `revision` is the one unquoted field.
 formula_revision() {
-  sed -n "s/^[[:space:]]*revision[[:space:]]\{1,\}\([0-9]\{1,\}\)\$/\1/p" "$1" | head -1
+  local matches
+  matches="$(sed -n "s/^[[:space:]]*revision[[:space:]]\{1,\}\([0-9]\{1,\}\)\$/\1/p" "$1")"
+  printf '%s\n' "${matches%%$'\n'*}"
 }
 
 up_to_date() {
@@ -199,6 +205,11 @@ cleanup() {
   if [[ "$rc" -ne 0 && "$pushed" -eq 1 ]]; then
     # A pushed branch with no PR is worse than no branch: the fail-closed guard
     # would treat the formula as handled and skip it on every future run.
+    if [[ -n "$(gh pr list --state all --head "$branch" --json number --jq '.[].number' 2>/dev/null)" ]]; then
+      log "==> ${formula}: a PR for ${branch} exists after all, leaving the branch alone"
+      rm -rf "$release_json" "$workdir"
+      return
+    fi
     log "==> ${formula}: opening the PR failed, deleting ${branch} from origin"
     git -C "$REPO_ROOT" push origin --delete "$branch" >/dev/null 2>&1 \
       || log "==> ${formula}: could not delete ${branch} from origin — delete it by hand, or the next run will skip this formula"
@@ -258,7 +269,7 @@ if [[ "$current_url" != "$expected_url" ]]; then
 fi
 
 log "==> ${formula}: downloading ${asset_name}"
-curl -fsSL --retry 3 --retry-delay 2 -o "${workdir}/${asset_name}" "$download_url" \
+curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 -o "${workdir}/${asset_name}" "$download_url" \
   || die "${formula}: download failed for ${download_url}"
 new_sha256="$(sha256_of "${workdir}/${asset_name}")"
 
@@ -276,9 +287,12 @@ fi
 if [[ "$has_sha256_asset" -eq 1 ]]; then
   [[ -n "${published_sha_url:-}" ]] \
     || die "${formula}: release ${tag} is missing the expected ${asset_name}.sha256"
-  curl -fsSL --retry 3 --retry-delay 2 -o "${workdir}/published.sha256" "$published_sha_url" \
+  curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 -o "${workdir}/published.sha256" "$published_sha_url" \
     || die "${formula}: download failed for ${published_sha_url}"
-  published_sha256="$(cut -d' ' -f1 <"${workdir}/published.sha256" | tr -d '[:space:]')"
+  published_sha256="$(grep -oiE '[0-9a-f]{64}' "${workdir}/published.sha256" || true)"
+  published_sha256="$(printf '%s' "${published_sha256%%$'\n'*}" | tr 'A-F' 'a-f')"
+  [[ -n "$published_sha256" ]] \
+    || die "${formula}: could not find a sha256 in ${asset_name}.sha256"
   [[ "$published_sha256" == "$new_sha256" ]] \
     || die "${formula}: sha256 mismatch — computed ${new_sha256}, published ${published_sha256}"
   log "==> ${formula}: sha256 matches the checksum published alongside the asset"
