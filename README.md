@@ -10,3 +10,4 @@ brew install TakiTake/tap/<formula>
 
 - [`pall8t`](Formula/pall8t.rb) — run AI coding agents in [apple/container](https://github.com/apple/container) sandboxes. See [TakiTake/pall8t](https://github.com/TakiTake/pall8t).
 - [`vpnp`](Formula/vpnp.rb) — AWS Client VPN on macOS without breaking [apple/container](https://github.com/apple/container). See [TakiTake/vpnp](https://github.com/TakiTake/vpnp).
+- [`openvpn-aws`](Formula/openvpn-aws.rb) — prebuilt patched OpenVPN for AWS Client VPN SAML federation (used by vpnp). See [TakiTake/openvpn-aws](https://github.com/TakiTake/openvpn-aws).
