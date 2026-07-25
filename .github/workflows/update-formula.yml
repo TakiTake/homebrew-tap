@@ -1,0 +1,74 @@
+name: update-formula
+
+# Polls upstream releases and opens PRs. Deliberately pull-based: a push-based
+# design (repository_dispatch from each upstream repo) would require a token
+# with write access to this tap stored in three other repositories. Here no
+# cross-repo credential exists at all — this workflow reads public release
+# metadata and writes only to its own repository.
+
+on:
+  schedule:
+    # Hourly, off the top of the hour (GitHub's scheduler is congested there).
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: "Formula to check (the list is fixed in the workflow)"
+        type: choice
+        default: all
+        options:
+          - all
+          - pall8t
+          - vpnp
+          - openvpn-aws
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # GitHub does not start workflow runs for PRs opened by GITHUB_TOKEN, so
+      # ci.yml never sees these PRs. Run the same checks here instead, before
+      # anything is pushed.
+      - name: Validate
+        run: .github/scripts/validate.sh
+
+      - name: Check formulae and open update PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Quoted, and only ever compared against the hardcoded list below.
+          SELECTED: ${{ inputs.formula || 'all' }}
+        run: |
+          set -euo pipefail
+          # Pin every update branch to the commit this job checked out, so a run
+          # that updates two formulae does not stack the second PR on the first.
+          export BASE_SHA="$(git rev-parse HEAD)"
+          failed=()
+          for formula in pall8t vpnp openvpn-aws; do
+            if [ "$SELECTED" != "all" ] && [ "$SELECTED" != "$formula" ]; then
+              continue
+            fi
+            if ! .github/scripts/update-formula.sh "$formula"; then
+              failed+=("$formula")
+            fi
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::failed formulae: ${failed[*]}"
+            exit 1
+          fi

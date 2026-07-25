@@ -9,7 +9,7 @@ class OpenvpnAws < Formula
   depends_on arch: :arm64
   depends_on :macos
 
-  # Prebuilt on GitHub Actions (see the openvpn-aws repo): OpenVPN 2.7.5
+  # Prebuilt on GitHub Actions (see the openvpn-aws repo): stock OpenVPN
   # with a 3-define buffer patch — AWS transports the multi-KB SAML
   # response as the password inside one TLS control message, which stock
   # OpenVPN caps at 2 KB (upstream rejected raising it: openvpn#295).
@@ -21,6 +21,6 @@ class OpenvpnAws < Formula
   end
 
   test do
-    assert_match "OpenVPN 2.7.5", shell_output("#{bin}/openvpn-aws --version")
+    assert_match "OpenVPN #{version}", shell_output("#{bin}/openvpn-aws --version")
   end
 end
