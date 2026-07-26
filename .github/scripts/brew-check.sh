@@ -66,6 +66,11 @@ fi
 
 # Named formulae — used by the update workflow, where an unrelated formula that
 # is already failing must not block this one's update PR.
+#
+# Confirmed against a real brew: `brew-check.sh openvpn-aws` staged 3 formulae
+# and reported "1 file inspected, no offenses detected", so a tap installed by
+# `cp -R` resolves, the scratch tap name works, and the audit really is scoped
+# to the named formula rather than quietly widening to the whole tap.
 for formula in "$@"; do
   [[ -f "${tap_dir}/Formula/${formula}.rb" ]] \
     || die "no such formula in the staged tap: ${formula}"
