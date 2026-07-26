@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate
+        run: .github/scripts/validate.sh
+
+  # `ruby -c` only proves a formula parses. brew style and brew audit understand
+  # Homebrew semantics it cannot see — component order, dependency order, a
+  # `version` stanza that merely restates what the URL already implies — which
+  # is what the automated updates in update-formula.yml rewrite.
+  #
+  # macOS because every formula here is `depends_on :macos`. Note this does not
+  # run on the update workflow's own PRs: GitHub starts no workflow runs for
+  # pull requests opened with GITHUB_TOKEN. Those are covered instead by the
+  # update workflow itself, which runs the same brew-check.sh before it opens
+  # the PR; this job gates human PRs and backstops everything via push to main.
+  audit:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # No arguments: check the whole tap, so a formula that has drifted turns
+      # this red even when the PR did not touch it. The update workflow calls
+      # the same script per formula, which is how the two stay in step.
+      - name: brew style and brew audit
+        run: .github/scripts/brew-check.sh

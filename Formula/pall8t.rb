@@ -5,8 +5,8 @@ class Pall8t < Formula
   sha256 "f170851b0605e30e4e0dd947e39df88c430e05a3bb7803bf542e93555e1f0e05"
   license "MIT"
 
-  depends_on :macos
   depends_on arch: :arm64
+  depends_on :macos
 
   def install
     bin.install "pall8t"

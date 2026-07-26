@@ -1,0 +1,173 @@
+name: update-formula
+
+# Polls upstream releases and opens PRs. Deliberately pull-based: a push-based
+# design (repository_dispatch from each upstream repo) would require a token
+# with write access to this tap stored in three other repositories. Here no
+# cross-repo credential exists at all — this workflow reads public release
+# metadata and writes only to its own repository.
+
+on:
+  schedule:
+    # Hourly, off the top of the hour (GitHub's scheduler is congested there).
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: "Formula to check (the list is fixed in the workflow)"
+        type: choice
+        default: all
+        options:
+          - all
+          - pall8t
+          - vpnp
+          - openvpn-aws
+
+# Granted per job instead: only `update` can write, and it is the job that runs
+# on macOS and opens PRs.
+permissions: {}
+
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
+
+# Split in two so that the Homebrew-level gate is affordable. GitHub starts no
+# workflow runs for PRs opened by GITHUB_TOKEN, so ci.yml never sees these PRs
+# and `brew audit` would otherwise only run after merge — on main, with the bad
+# formula already live. Running it before the PR is opened closes that, but the
+# poll finds nothing on ~23 of every 24 runs, and paying macOS setup hourly to
+# check something that changes a few times a month is not worth it.
+#
+# So: `detect` answers "is there any work?" cheaply on ubuntu, and `update` —
+# the macOS half that renders, audits, commits and opens PRs — starts only when
+# the answer is yes. No git state crosses the boundary: detect never pushes, so
+# push and PR creation stay in one job and the script's existing cleanup keeps
+# working unchanged. That removes *cross-job* stranding only — a cancellation
+# landing between the push and `gh pr create` can still leave a branch with no
+# PR, exactly as before the split, and the next run reports it loudly.
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # Space-separated subset of the hardcoded list below, or empty.
+      formulae: ${{ steps.check.outputs.formulae }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate
+        run: .github/scripts/validate.sh
+
+      - name: Check for available updates
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Quoted, and only ever compared against the hardcoded list below.
+          SELECTED: ${{ inputs.formula || 'all' }}
+        run: |
+          set -euo pipefail
+          # Plain strings rather than arrays throughout: the sibling job runs on
+          # macOS, where /bin/bash is 3.2 and expanding an empty array under
+          # `set -u` is a fatal error — on the success path, where nothing
+          # failed. Kept identical here so the two jobs cannot diverge.
+          pending=""
+          failed=""
+          for formula in pall8t vpnp openvpn-aws; do
+            if [ "$SELECTED" != "all" ] && [ "$SELECTED" != "$formula" ]; then
+              continue
+            fi
+            rc=0
+            CHECK_ONLY=1 .github/scripts/update-formula.sh "$formula" || rc=$?
+            case "$rc" in
+              0) pending="${pending}${pending:+ }${formula}" ;;
+              100) ;;  # up to date, or a PR is already open
+              # Any other status is a real failure — a broken tag, an API error,
+              # a stranded branch. Never quietly treated as "nothing to do".
+              *) failed="${failed}${failed:+ }${formula}" ;;
+            esac
+          done
+          # Written before the failure check on purpose, and load-bearing: the
+          # update job runs on `!cancelled()`, so publishing what *did* succeed
+          # is what lets a healthy formula still get its PR when another one is
+          # broken. Do not move this below the exit.
+          echo "formulae=${pending}" >> "$GITHUB_OUTPUT"
+          echo "updates available: ${pending:-none}"
+          if [ -n "$failed" ]; then
+            echo "::error::failed formulae: ${failed}"
+            exit 1
+          fi
+
+  update:
+    needs: detect
+    # `!cancelled()` because a bare `if:` implies `success()`, which would let
+    # one broken formula suppress the updates detect *did* find for the others —
+    # a stranded branch is a hard error until a human clears it, and the single
+    # job it replaced went on to open the healthy PRs before reporting failure.
+    # detect writes its output before it checks for failures, so this is safe:
+    # if it died earlier than that, `formulae` is empty and this skips anyway.
+    if: ${{ !cancelled() && needs.detect.outputs.formulae != '' }}
+    # macOS because every formula here is `depends_on :macos`, and because this
+    # is where brew style and brew audit run.
+    runs-on: macos-latest
+    # Generous: macOS runners queue longer than ubuntu ones, and this job
+    # downloads release assets before it audits anything.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Also run here, not just in detect. Two reasons beyond the few seconds it
+      # costs: the PR body tells reviewers this ran, and it should be true of the
+      # job that actually opens the PR; and this is the only place `bash -n` sees
+      # the scripts under the macOS bash that will execute them.
+      - name: Validate
+        run: .github/scripts/validate.sh
+
+      - name: Update formulae and open PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BREW_AUDIT: 1
+          PENDING: ${{ needs.detect.outputs.formulae }}
+        run: |
+          set -euo pipefail
+          # Pin every update branch to the commit this job checked out, so a run
+          # that updates two formulae does not stack the second PR on the first.
+          # Assigned before exporting: `export X="$(cmd)"` returns export's own
+          # status, so a failing cmd is masked and `set -e` never fires (SC2155).
+          BASE_SHA="$(git rev-parse HEAD)"
+          export BASE_SHA
+          # A string, not an array: /bin/bash here is 3.2, where `${#arr[@]}` on
+          # an empty array under `set -u` aborts — which is the path taken when
+          # every formula succeeds.
+          failed=""
+          # Filtering the hardcoded list against the detect output rather than
+          # iterating the output directly. `formula_config` already dies on an
+          # unknown name, so this is defence in depth rather than the only thing
+          # keeping the repo set fixed — it just keeps that set readable in
+          # reviewed source instead of inferred from a job output.
+          for formula in pall8t vpnp openvpn-aws; do
+            case " $PENDING " in
+              *" $formula "*) ;;
+              *) continue ;;
+            esac
+            if ! .github/scripts/update-formula.sh "$formula"; then
+              failed="${failed}${failed:+ }${formula}"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::failed formulae: ${failed}"
+            exit 1
+          fi
