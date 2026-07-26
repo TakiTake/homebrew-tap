@@ -25,10 +25,12 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly TAP="takitake/tap-check"
 readonly TAP_PATH="takitake/homebrew-tap-check"
 
-# Keep brew from updating itself, and — the part that matters here — from
-# touching the staged tap's git state. This directory is a copy of the working
-# tree including .git, and a brew that reset it would audit the *previous*
-# formula contents and report a pass.
+# Belt and braces, not load-bearing: brew only auto-updates for install,
+# outdated, upgrade, bundle, release and `tap` with arguments, so neither of the
+# commands below would trigger it and neither can have the staged tap's git
+# state reset underneath it. Set anyway, because that list is Homebrew's to
+# change and the failure it would cause here — auditing the *previous* formula
+# contents and reporting a pass — is silent.
 export HOMEBREW_NO_AUTO_UPDATE=1
 
 die() { printf '::error::%s\n' "$*" >&2; exit 1; }
