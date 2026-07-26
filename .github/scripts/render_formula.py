@@ -133,7 +133,9 @@ def render(text, env):
     # be left behind while url and sha256 advance — the formula would ship new
     # bytes under the old pkg_version, which is the one failure this file is
     # built to prevent. Refuse rather than silently ignore it.
-    if re.search(r"^[ \t]*version\s", text, flags=re.M):
+    # Requires the quote so a `caveats` heredoc line starting with the word
+    # "version" is not mistaken for a stanza and does not halt the formula.
+    if re.search(r"^[ \t]*version\s+[\"']", text, flags=re.M):
         sys.exit(
             "this formula declares a `version`, which brew audit rejects as "
             "redundant with the version scanned from the url. Remove it, or — if "

@@ -135,6 +135,16 @@ class TestRender(unittest.TestCase):
             render_formula.render(with_version, env())
         self.assertIn("version", str(cm.exception))
 
+    def test_prose_mentioning_version_is_not_a_stanza(self):
+        """A caveats heredoc line starting with the word must not halt the run."""
+        with_caveat = SIMPLE.replace(
+            "end\n",
+            '  def caveats\n    <<~EOS\n      version 2 of the config is required\n'
+            "    EOS\n  end\nend\n",
+        )
+        out = render_formula.render(with_caveat, env())
+        self.assertIn("version 2 of the config is required", out)
+
     def test_ambiguous_url_lines_are_fatal(self):
         doubled = SIMPLE.replace('  license "MIT"\n', '  url "https://x/y.tar.gz"\n')
         with self.assertRaises(SystemExit):
@@ -268,25 +278,36 @@ class TestCompareVersions(unittest.TestCase):
 
 class TestVersionOf(unittest.TestCase):
     """`version_of` decides whether a revision resets or climbs, so its exact
-    shape matters: it must strip a build number and nothing else."""
+    shape matters: it must strip a build number and nothing else.
 
-    CASES = {
+    Read the two tables carefully — they claim different things. GATED holds
+    tags update-formula.sh admits, so those answers must equal what Homebrew
+    derives from the url, and they have been checked against a real `brew`.
+    UNGATED holds tags the gate refuses; those entries pin the regex only and
+    are NOT assertions about Homebrew. Homebrew in fact disagrees with several
+    of them (its winning parser captures up to the next hyphen rather than
+    stripping a trailing build number), which is exactly why the gate refuses
+    them — see TestTagValidation.test_rejects_tags_homebrew_reads_differently.
+    """
+
+    GATED = {
         "v2.7.5-0": "v2.7.5",
         "v2.7.5-1": "v2.7.5",
         "v2.7.5-10": "v2.7.5",
         "v2.7.5": "v2.7.5",
         "v0.2.0": "v0.2.0",
         "v1.2.3.4": "v1.2.3.4",
-        # A prerelease tail is part of the version, not a build number.
+        "v1.0-0": "v1.0",
+    }
+
+    UNGATED = {
         "v2.8.0-rc1": "v2.8.0-rc1",
         "v2.8.0-rc1-2": "v2.8.0-rc1",
-        # Only a trailing run, so the shape change 1.0.0 -> 1.0 stays visible.
-        "v1.0-0": "v1.0",
-        # Anchored: a build number that is not last is not a build number.
-        "v2.7.5-0-beta": "v2.7.5-0-beta",
-        # At least one digit, so a bare trailing hyphen is left alone.
-        "v2.7.5-": "v2.7.5-",
+        "v2.7.5-0-beta": "v2.7.5-0-beta",  # brew reads 2.7.5
+        "v2.7.5-": "v2.7.5-",  # brew reads 2.7.5
     }
+
+    CASES = {**GATED, **UNGATED}
 
     def test_strips_only_a_trailing_build_number(self):
         for tag, want in self.CASES.items():
@@ -352,10 +373,38 @@ class TestTagValidation(unittest.TestCase):
 
     def test_rejects_tags_whose_homebrew_version_is_unverified(self):
         """The gate is narrow on purpose: render_formula.version_of has to
-        predict Homebrew's url-derived version, and only these two shapes have
-        been checked against a real brew. A prerelease reaching `brew upgrade`
-        users would be a bad outcome even if the prediction happened to hold."""
-        for tag in ("v2.8.0-rc1", "v10.0.0-rc1", "v1.1.1w", "v2.7.5-", "v2026-07-25"):
+        predict Homebrew's url-derived version, and only these shapes have been
+        checked against a real brew. A prerelease reaching `brew upgrade` users
+        would be a bad outcome even if the prediction happened to hold."""
+        for tag in ("v2.8.0-rc1", "v10.0.0-rc1", "v1.1.1w", "v2026-07-25"):
+            self.assertFalse(self.accepts(tag), tag)
+
+    def test_rejects_tags_homebrew_reads_differently(self):
+        """Each of these is a tag where version_of and Homebrew disagree.
+
+        Homebrew derives the version with StemParser(/-v?(\d[^-]+)/), which
+        captures up to the NEXT HYPHEN rather than stripping a trailing build
+        number — the two rules agree on v2.7.5-0 and part ways here. Letting one
+        through resets the revision on a version Homebrew considers unchanged,
+        which is a pkg_version that fails to climb (or drops, if a same-tag
+        re-upload had already raised it). The gate is what makes version_of's
+        model safe, so these must stay rejected.
+        """
+        for tag in (
+            "v1.0.0-hotfix1",  # brew: 1.0.0
+            "v1.0.0-dev",  # brew: 1.0.0
+            "v1.0.0-snapshot",  # brew: 1.0.0
+            "v1.0.0-p1",  # brew: 1.0.0
+            "v1.0.0-post1",  # brew: 1.0.0
+            "v2.7.5-0-beta",  # brew: 2.7.5
+            "v2.7.5-",  # brew: 2.7.5
+            "v2.7.5-0-1",  # brew: 0-1
+            "v1-0",  # brew: no parser matches at all
+            "v9-0",  # brew: no parser matches at all
+            "v2.8.0-rc100",  # brew: 2.8.0-rc10 (suffix takes at most 2 digits)
+            "v2.8.0-beta100",  # brew: 2.8.0-beta10
+            "v1.0.0-preview",  # brew: 1.0.0-pre (truncated mid-word)
+        ):
             self.assertFalse(self.accepts(tag), tag)
 
     def test_rejects_dangerous_tags(self):
