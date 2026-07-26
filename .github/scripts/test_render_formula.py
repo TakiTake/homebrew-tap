@@ -282,7 +282,9 @@ class TestVersionOf(unittest.TestCase):
 
     Read the two tables carefully — they claim different things. GATED holds
     tags update-formula.sh admits, so those answers must equal what Homebrew
-    derives from the url, and they have been checked against a real `brew`.
+    derives from the url. Entries marked `brew:` were observed directly on a
+    real brew; the rest are the parser's reading of shapes no upstream here has
+    published yet. Do not promote one to `brew:` without running the command.
     UNGATED holds tags the gate refuses; those entries pin the regex only and
     are NOT assertions about Homebrew. Homebrew in fact disagrees with several
     of them (its winning parser captures up to the next hyphen rather than
@@ -290,9 +292,11 @@ class TestVersionOf(unittest.TestCase):
     them — see TestTagValidation.test_rejects_tags_homebrew_reads_differently.
     """
 
+    # brew: Version.detect on the real asset url returned exactly this.
+    #   brew ruby -e 'p Version.detect("<url>").to_s'
     GATED = {
-        "v2.7.5-0": "v2.7.5",
-        "v2.7.5-1": "v2.7.5",
+        "v2.7.5-0": "v2.7.5",  # brew: 2.7.5 (via `brew audit` redundancy report)
+        "v2.7.5-1": "v2.7.5",  # brew: 2.7.5 — the rebuild case revision rests on
         "v2.7.5-10": "v2.7.5",
         "v2.7.5": "v2.7.5",
         "v0.2.0": "v0.2.0",

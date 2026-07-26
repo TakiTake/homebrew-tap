@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rewrite a Homebrew formula's url/sha256 (and version/revision) in place.
+r"""Rewrite a Homebrew formula's url/sha256 (and version/revision) in place.
 
 Two invariants, both enforced here rather than left to review:
 
@@ -12,9 +12,17 @@ Two invariants, both enforced here rather than left to review:
     users silently never receive, however correct the url and sha256 are.
 
 No formula here declares a `version`: Homebrew derives it from the URL, and
-`brew audit` rejects a stanza that merely restates what it already found. It
-strips a `-<build>` suffix while doing so, mapping v2.7.5-0 and v2.7.5-1 both to
-2.7.5 — which is why `revision` has to carry rebuilds.
+`brew audit` rejects a stanza that merely restates what it already found. The
+parser that wins for this tap's asset names is StemParser(/-v?(\d[^-]+)/), which
+captures from `-v` up to the *next hyphen* — so v2.7.5-0 and v2.7.5-1 both yield
+2.7.5, which is why `revision` has to carry rebuilds. Confirmed on a real brew:
+
+    brew ruby -e 'p Version.detect("...v2.7.5-1-aarch64-apple-darwin.tar.gz").to_s'
+    "2.7.5"
+
+Note it stops *before* the hyphen rather than stripping a trailing build number;
+the two rules agree on -0/-1 and diverge elsewhere, which is what the tag gate in
+update-formula.sh exists to keep out.
 
 Usage: render_formula.py <src> <dst>
 Env:   NEW_URL, NEW_SHA256, NEW_REVISION
@@ -98,11 +106,13 @@ def tag_of(url):
 def version_of(tag):
     """The version Homebrew derives from a tag: the tag minus its build number.
 
-    v2.7.5-0 and v2.7.5-1 are two builds of the same version, so this is the
-    axis `revision` has to move on. Only a trailing all-digit run is cut, so a
-    tail like -rc1 would stay part of the version — update-formula.sh's tag gate
-    rejects those shapes before they reach here, precisely because whether that
-    matches Homebrew's own derivation has not been confirmed against a real brew.
+    v2.7.5-0 and v2.7.5-1 are two builds of the same version (verified against a
+    real brew — see the module docstring), so this is the axis `revision` has to
+    move on. Only a trailing all-digit run is cut, so a tail like -rc1 would stay
+    part of the version, where Homebrew's parser would instead stop at the hyphen
+    and read plain 2.8.0. update-formula.sh's tag gate rejects every shape on
+    which the two disagree, so that divergence stays unreachable rather than
+    merely unlikely.
     """
     return re.sub(r"-\d+$", "", tag)
 
