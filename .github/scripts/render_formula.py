@@ -11,8 +11,13 @@ Two invariants, both enforced here rather than left to review:
     revision — so a render that fails to increase it produces an update that
     users silently never receive, however correct the url and sha256 are.
 
+No formula here declares a `version`: Homebrew derives it from the URL, and
+`brew audit` rejects a stanza that merely restates what it already found. It
+strips a `-<build>` suffix while doing so, mapping v2.7.5-0 and v2.7.5-1 both to
+2.7.5 — which is why `revision` has to carry rebuilds.
+
 Usage: render_formula.py <src> <dst>
-Env:   NEW_URL, NEW_SHA256, EXPLICIT_VERSION, NEW_VERSION, NEW_REVISION
+Env:   NEW_URL, NEW_SHA256, NEW_REVISION
 """
 
 import os
@@ -21,13 +26,11 @@ import sys
 
 URL_RE = r'^([ \t]*)url\s+"[^"]*"$'
 SHA_RE = r'^([ \t]*)sha256\s+"[^"]*"$'
-VERSION_RE = r'^([ \t]*)version\s+"[^"]*"$'
 REVISION_RE = r"^[ \t]*revision\s+\d+\n"
 
 # Read-only counterparts, capturing the value rather than the indent.
 URL_VALUE_RE = r'^[ \t]*url\s+"([^"]*)"$'
 SHA_VALUE_RE = r'^[ \t]*sha256\s+"([^"]*)"$'
-VERSION_VALUE_RE = r'^[ \t]*version\s+"([^"]*)"$'
 REVISION_VALUE_RE = r"^[ \t]*revision\s+(\d+)$"
 
 TAG_IN_URL_RE = r"/releases/download/([^/]+)/"
@@ -92,6 +95,16 @@ def tag_of(url):
     return match.group(1) if match else None
 
 
+def version_of(tag):
+    """The version Homebrew derives from a tag: the tag minus its build number.
+
+    v2.7.5-0 and v2.7.5-1 are two builds of the same version, so this is the
+    axis `revision` has to move on. A prerelease tail like -rc1 is part of the
+    version rather than a build number, so only a trailing all-digit run is cut.
+    """
+    return re.sub(r"-\d+$", "", tag)
+
+
 def resolve_revision(*, version_changed, sha_changed, old_revision, derived_revision):
     """Pick a revision that keeps pkg_version moving forward.
 
@@ -113,7 +126,18 @@ def resolve_revision(*, version_changed, sha_changed, old_revision, derived_revi
 def render(text, env):
     new_url = env["NEW_URL"]
     new_sha256 = env["NEW_SHA256"]
-    explicit_version = env.get("EXPLICIT_VERSION") == "1"
+
+    # Nothing here rewrites a `version` line any more, so one that exists would
+    # be left behind while url and sha256 advance — the formula would ship new
+    # bytes under the old pkg_version, which is the one failure this file is
+    # built to prevent. Refuse rather than silently ignore it.
+    if re.search(r"^[ \t]*version\s", text, flags=re.M):
+        sys.exit(
+            "this formula declares a `version`, which brew audit rejects as "
+            "redundant with the version scanned from the url. Remove it, or — if "
+            "a url ever stops parsing and the stanza is genuinely needed — teach "
+            "this script to rewrite it again before re-adding it"
+        )
 
     old_url = first_value(text, URL_VALUE_RE)
     old_sha256 = first_value(text, SHA_VALUE_RE)
@@ -134,27 +158,22 @@ def render(text, env):
         f"the most recently published release, not the highest version, so this "
         f"is probably a deleted release or one flipped to prerelease"
     )
+    # Both axes, because neither catches the other's case. Raw tags catch a
+    # build-number drop (v2.7.5-3 -> v2.7.5-1), which the derived versions see
+    # as equal. Derived versions catch a tag whose *shape* changes (v1.0.0 ->
+    # v1.0-0), which tokenizes identically as a raw tag but means 1.0.0 -> 1.0.
     if compare_versions(new_tag, old_tag) < 0:
         sys.exit(downgrade)
-
-    # The tag comparison is not enough on its own: tags and versions are not the
-    # same axis. v1.0.0 and v1.0-0 are different tags that tokenize identically,
-    # yet derive versions 1.0.0 and 1.0 — a downgrade the tag check waves past.
-    if explicit_version:
-        old_version = first_value(text, VERSION_VALUE_RE)
-        if old_version and compare_versions(env["NEW_VERSION"], old_version) < 0:
-            sys.exit(f"{downgrade} (version {old_version} -> {env['NEW_VERSION']})")
+    if compare_versions(version_of(new_tag), version_of(old_tag)) < 0:
+        sys.exit(f"{downgrade} (version {version_of(old_tag)} -> {version_of(new_tag)})")
 
     sha_changed = old_sha256 != new_sha256
     if old_url == new_url and not sha_changed:
         sys.exit("nothing to update: url and sha256 both already current")
 
-    # For a formula with an explicit `version`, that line is the version. For
-    # the others Homebrew derives it from the URL, so the tag stands in for it.
-    if explicit_version:
-        version_changed = first_value(text, VERSION_VALUE_RE) != env["NEW_VERSION"]
-    else:
-        version_changed = old_tag != new_tag
+    # Keyed on the derived version, not the raw tag: v2.7.5-3 -> v2.7.5-4 is a
+    # new tag but the same version, so the revision still has to climb.
+    version_changed = version_of(old_tag) != version_of(new_tag)
 
     revision = resolve_revision(
         version_changed=version_changed,
@@ -167,13 +186,6 @@ def render(text, env):
     text = replace_one(
         SHA_RE, lambda m: f'{m.group(1)}sha256 "{new_sha256}"', text, "sha256"
     )
-    if explicit_version:
-        text = replace_one(
-            VERSION_RE,
-            lambda m: f'{m.group(1)}version "{env["NEW_VERSION"]}"',
-            text,
-            "version",
-        )
     return set_revision(text, revision)
 
 

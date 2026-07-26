@@ -40,19 +40,16 @@ formula_config() {
       repo="TakiTake/pall8t"
       asset_template="pall8t-@TAG@-aarch64-apple-darwin.tar.gz"
       has_sha256_asset=1
-      explicit_version=0
       ;;
     vpnp)
       repo="TakiTake/vpnp"
       asset_template="vpnp-@TAG@-aarch64-apple-darwin.tar.gz"
       has_sha256_asset=0
-      explicit_version=0
       ;;
     openvpn-aws)
       repo="TakiTake/openvpn-aws"
       asset_template="openvpn-aws-@TAG@-aarch64-apple-darwin.tar.gz"
       has_sha256_asset=0
-      explicit_version=1
       ;;
     *)
       die "unknown formula: $1"
@@ -307,17 +304,11 @@ if [[ "$current_url" == "$expected_url" ]]; then
   skip_if_already_handled "$branch"
 fi
 
-new_version=""
-new_revision=0
-if [[ "$explicit_version" -eq 1 ]]; then
-  derive_version_and_revision "$tag"
-  [[ -n "$new_version" ]] || die "${formula}: could not derive a version from tag ${tag}"
-fi
+derive_version_and_revision "$tag"
 
 render() {
   NEW_URL="$expected_url" NEW_SHA256="$new_sha256" \
-  NEW_VERSION="$new_version" NEW_REVISION="$new_revision" \
-  EXPLICIT_VERSION="$explicit_version" \
+  NEW_REVISION="$new_revision" \
   python3 "${REPO_ROOT}/.github/scripts/render_formula.py" "$1" "$2"
 }
 
@@ -352,15 +343,13 @@ if git -C "$REPO_ROOT" diff --quiet -- "Formula/${formula}.rb"; then
   exit 0
 fi
 
-# Read these back off the rendered formula rather than reporting what was
-# derived from the tag: the renderer may raise the revision to keep pkg_version
-# moving when an asset is re-uploaded under an unchanged tag.
-version_note=""
-rendered_version="$(formula_field "$formula_path" version)"
+# The version is what this script derived from the tag; Homebrew derives its own
+# from the url and nothing here cross-checks the two, so say where it came from
+# rather than implying it is Homebrew's. The revision is read back off the
+# rendered formula because the renderer may raise it past the build number to
+# keep pkg_version moving after a same-tag re-upload.
+version_note=$'\n''- version: `'"${new_version}"'` (derived from the tag)'
 rendered_revision="$(formula_revision "$formula_path")"
-if [[ -n "$rendered_version" ]]; then
-  version_note+=$'\n''- version: `'"${rendered_version}"'`'
-fi
 if [[ -n "$rendered_revision" ]]; then
   version_note+=$'\n''- revision: `'"${rendered_revision}"'` (raises pkg_version so `brew upgrade` picks this up)'
 fi

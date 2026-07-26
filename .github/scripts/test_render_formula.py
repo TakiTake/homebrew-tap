@@ -35,7 +35,6 @@ VERSIONED = f'''class OpenvpnAws < Formula
   desc "d"
   homepage "https://github.com/TakiTake/openvpn-aws"
   url "https://github.com/TakiTake/openvpn-aws/releases/download/v2.7.5-0/openvpn-aws-v2.7.5-0-aarch64-apple-darwin.tar.gz"
-  version "2.7.5"
   sha256 "{OLD_SHA}"
   license "GPL-2.0-only"
 end
@@ -46,23 +45,17 @@ def url_for(tag, repo="TakiTake/vpnp"):
     return f"https://github.com/{repo}/releases/download/{tag}/asset-{tag}.tar.gz"
 
 
-def env(tag="v0.2.0", sha=NEW_SHA, version=None, revision=0, repo="TakiTake/vpnp"):
-    """Build a renderer environment. `version` set => explicit-version formula."""
-    out = {
+def env(tag="v0.2.0", sha=NEW_SHA, revision=0, repo="TakiTake/vpnp"):
+    return {
         "NEW_URL": url_for(tag, repo),
         "NEW_SHA256": sha,
-        "EXPLICIT_VERSION": "1" if version else "0",
+        "NEW_REVISION": str(revision),
     }
-    if version:
-        out["NEW_VERSION"] = version
-        out["NEW_REVISION"] = str(revision)
-    return out
 
 
-def versioned(tag, version, revision=0, sha=NEW_SHA):
-    return env(
-        tag=tag, sha=sha, version=version, revision=revision, repo="TakiTake/openvpn-aws"
-    )
+def versioned(tag, revision=0, sha=NEW_SHA):
+    """A release of openvpn-aws, whose tags carry a -<build> suffix."""
+    return env(tag=tag, sha=sha, revision=revision, repo="TakiTake/openvpn-aws")
 
 
 def revision_of(text):
@@ -84,22 +77,17 @@ class TestRender(unittest.TestCase):
             if line.strip().startswith(("url ", "sha256 ")):
                 self.assertTrue(line.startswith("  ") and line[2] != " ", line)
 
-    def test_version_line_untouched_when_not_explicit(self):
-        out = render_formula.render(VERSIONED, env(tag="v2.7.6-0"))
-        self.assertIn('version "2.7.5"', out)
-
-    def test_explicit_version_updated(self):
-        out = render_formula.render(VERSIONED, versioned("v2.7.6-0", "2.7.6"))
-        self.assertIn('version "2.7.6"', out)
+    def test_new_upstream_version_clears_the_revision(self):
+        out = render_formula.render(VERSIONED, versioned("v2.7.6-0"))
         self.assertEqual(revision_of(out), 0)
 
     def test_build_number_becomes_a_revision_line(self):
-        out = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
+        out = render_formula.render(VERSIONED, versioned("v2.7.5-1", 1))
         self.assertEqual(revision_of(out), 1)
 
     def test_revision_goes_after_license(self):
         """Homebrew's ComponentsOrder is url, version, sha256, license, revision."""
-        out = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
+        out = render_formula.render(VERSIONED, versioned("v2.7.5-1", 1))
         lines = [line.strip() for line in out.splitlines()]
         self.assertEqual(
             lines.index("revision 1"), lines.index('license "GPL-2.0-only"') + 1
@@ -107,40 +95,45 @@ class TestRender(unittest.TestCase):
 
     def test_revision_falls_back_to_sha256_without_a_license(self):
         no_license = VERSIONED.replace('  license "GPL-2.0-only"\n', "")
-        out = render_formula.render(no_license, versioned("v2.7.5-1", "2.7.5", 1))
+        out = render_formula.render(no_license, versioned("v2.7.5-1", 1))
         lines = [line.strip() for line in out.splitlines()]
         self.assertEqual(
             lines.index("revision 1"), lines.index(f'sha256 "{NEW_SHA}"') + 1
         )
 
     def test_revision_reset_on_a_new_upstream_version(self):
-        withrev = render_formula.render(VERSIONED, versioned("v2.7.5-2", "2.7.5", 2))
+        withrev = render_formula.render(VERSIONED, versioned("v2.7.5-2", 2))
         self.assertEqual(revision_of(withrev), 2)
-        bumped = render_formula.render(withrev, versioned("v2.7.6-0", "2.7.6"))
+        bumped = render_formula.render(withrev, versioned("v2.7.6-0"))
         self.assertNotIn("revision", bumped)
-        self.assertIn('version "2.7.6"', bumped)
+        self.assertIn("v2.7.6-0", bumped)
 
     def test_only_one_revision_line_ever(self):
-        once = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
+        once = render_formula.render(VERSIONED, versioned("v2.7.5-1", 1))
         twice = render_formula.render(
-            once, versioned("v2.7.5-2", "2.7.5", 2, sha="c" * 64)
+            once, versioned("v2.7.5-2", 2, sha="c" * 64)
         )
         self.assertEqual(len(re.findall(r"revision \d+", twice)), 1)
         self.assertEqual(revision_of(twice), 2)
 
     def test_a_new_tag_carrying_identical_bytes_leaves_the_revision_alone(self):
         """Same binary, so there is nothing for `brew upgrade` to deliver."""
-        once = render_formula.render(VERSIONED, versioned("v2.7.5-1", "2.7.5", 1))
-        twice = render_formula.render(once, versioned("v2.7.5-2", "2.7.5", 2))
+        once = render_formula.render(VERSIONED, versioned("v2.7.5-1", 1))
+        twice = render_formula.render(once, versioned("v2.7.5-2", 2))
         self.assertEqual(revision_of(twice), 1)
 
     def test_missing_url_line_is_fatal(self):
         with self.assertRaises(SystemExit):
             render_formula.render(SIMPLE.replace('  url "', '  #url "'), env())
 
-    def test_missing_version_line_is_fatal_when_expected(self):
-        with self.assertRaises(SystemExit):
-            render_formula.render(SIMPLE, versioned("v1.0.0", "1.0"))
+    def test_a_version_stanza_is_refused(self):
+        """Nothing rewrites a `version` line any more, so one that exists would
+        be left stale while url and sha256 advance — ship new bytes under the
+        old pkg_version. brew audit rejects it too; fail rather than ignore."""
+        with_version = SIMPLE.replace("  sha256", '  version "0.1.0"\n  sha256')
+        with self.assertRaises(SystemExit) as cm:
+            render_formula.render(with_version, env())
+        self.assertIn("version", str(cm.exception))
 
     def test_ambiguous_url_lines_are_fatal(self):
         doubled = SIMPLE.replace('  license "MIT"\n', '  url "https://x/y.tar.gz"\n')
@@ -152,11 +145,11 @@ class TestRender(unittest.TestCase):
             text = (ROOT / "Formula" / f"{name}.rb").read_text()
             out = render_formula.render(text, env(tag="v999.0.0"))
             self.assertIn(f'  url "{url_for("v999.0.0")}"', out, name)
-        # A version the formula can never legitimately reach, so this test does
-        # not start failing the day the bot lands a real upgrade.
+        # A tag the formula can never legitimately reach, so this test does not
+        # start failing the day the bot lands a real upgrade.
         text = (ROOT / "Formula" / "openvpn-aws.rb").read_text()
-        out = render_formula.render(text, versioned("v999.0.0-0", "999.0.0"))
-        self.assertIn('version "999.0.0"', out)
+        out = render_formula.render(text, versioned("v999.0.0-0"))
+        self.assertIn("v999.0.0-0", out)
 
 
 class TestUpgradeOrdering(unittest.TestCase):
@@ -165,31 +158,31 @@ class TestUpgradeOrdering(unittest.TestCase):
 
     def test_older_tag_is_refused(self):
         with self.assertRaises(SystemExit) as cm:
-            render_formula.render(VERSIONED, versioned("v2.7.4-0", "2.7.4"))
+            render_formula.render(VERSIONED, versioned("v2.7.4-0"))
         self.assertIn("downgrade", str(cm.exception))
 
     def test_lower_build_number_is_refused(self):
-        withrev = render_formula.render(VERSIONED, versioned("v2.7.5-3", "2.7.5", 3))
+        withrev = render_formula.render(VERSIONED, versioned("v2.7.5-3", 3))
         with self.assertRaises(SystemExit) as cm:
-            render_formula.render(withrev, versioned("v2.7.5-1", "2.7.5", 1))
+            render_formula.render(withrev, versioned("v2.7.5-1", 1))
         self.assertIn("downgrade", str(cm.exception))
 
     def test_reupload_under_the_same_tag_bumps_the_revision(self):
         """The tag cannot change, so only a revision can carry the new bytes."""
-        out = render_formula.render(VERSIONED, versioned("v2.7.5-0", "2.7.5", 0))
+        out = render_formula.render(VERSIONED, versioned("v2.7.5-0", 0))
         self.assertEqual(revision_of(out), 1)
         self.assertIn(f'sha256 "{NEW_SHA}"', out)
 
-    def test_reupload_bumps_revision_without_an_explicit_version_too(self):
+    def test_reupload_bumps_revision_on_a_revisionless_formula(self):
         """pall8t/vpnp derive their version from the URL, so a same-tag
         re-upload has no other way to register as an upgrade."""
         out = render_formula.render(SIMPLE, env(tag="v0.1.0"))
         self.assertEqual(revision_of(out), 1)
 
     def test_repeated_reuploads_keep_climbing(self):
-        first = render_formula.render(VERSIONED, versioned("v2.7.5-0", "2.7.5", 0))
+        first = render_formula.render(VERSIONED, versioned("v2.7.5-0", 0))
         second = render_formula.render(
-            first, versioned("v2.7.5-0", "2.7.5", 0, sha="c" * 64)
+            first, versioned("v2.7.5-0", 0, sha="c" * 64)
         )
         self.assertEqual(revision_of(second), 2)
 
@@ -197,17 +190,17 @@ class TestUpgradeOrdering(unittest.TestCase):
         """v2.7.5-3 and v2.7.5-4 are different tags but the same version, so the
         build number alone cannot be trusted to raise pkg_version — a re-upload
         may already have pushed the revision past it."""
-        at3 = render_formula.render(VERSIONED, versioned("v2.7.5-3", "2.7.5", 3))
+        at3 = render_formula.render(VERSIONED, versioned("v2.7.5-3", 3))
         self.assertEqual(revision_of(at3), 3)
         # A re-upload under v2.7.5-3 raises the revision to 4.
         reuploaded = render_formula.render(
-            at3, versioned("v2.7.5-3", "2.7.5", 3, sha="c" * 64)
+            at3, versioned("v2.7.5-3", 3, sha="c" * 64)
         )
         self.assertEqual(revision_of(reuploaded), 4)
         # Upstream then ships v2.7.5-4, whose build number is only 4. Taking it
         # verbatim would leave pkg_version flat at 2.7.5_4.
         at4 = render_formula.render(
-            reuploaded, versioned("v2.7.5-4", "2.7.5", 4, sha="d" * 64)
+            reuploaded, versioned("v2.7.5-4", 4, sha="d" * 64)
         )
         self.assertGreater(revision_of(at4), revision_of(reuploaded))
 
@@ -232,11 +225,9 @@ class TestUpgradeOrdering(unittest.TestCase):
     def test_version_downgrade_is_refused_even_when_tags_tokenize_equal(self):
         """v1.0.0 and v1.0-0 tokenize identically but derive different versions,
         so the tag comparison alone waves the downgrade through."""
-        at_1_0_0 = VERSIONED.replace("v2.7.5-0", "v1.0.0").replace(
-            'version "2.7.5"', 'version "1.0.0"'
-        )
+        at_1_0_0 = VERSIONED.replace("v2.7.5-0", "v1.0.0")
         with self.assertRaises(SystemExit) as cm:
-            render_formula.render(at_1_0_0, versioned("v1.0-0", "1.0"))
+            render_formula.render(at_1_0_0, versioned("v1.0-0"))
         self.assertIn("downgrade", str(cm.exception))
 
     def test_unrecognisable_url_is_fatal_rather_than_unguarded(self):
@@ -273,6 +264,42 @@ class TestCompareVersions(unittest.TestCase):
         for left, right, want in cases:
             with self.subTest(left=left, right=right):
                 self.assertEqual(render_formula.compare_versions(left, right), want)
+
+
+class TestVersionOf(unittest.TestCase):
+    """`version_of` decides whether a revision resets or climbs, so its exact
+    shape matters: it must strip a build number and nothing else."""
+
+    CASES = {
+        "v2.7.5-0": "v2.7.5",
+        "v2.7.5-1": "v2.7.5",
+        "v2.7.5-10": "v2.7.5",
+        "v2.7.5": "v2.7.5",
+        "v0.2.0": "v0.2.0",
+        "v1.2.3.4": "v1.2.3.4",
+        # A prerelease tail is part of the version, not a build number.
+        "v2.8.0-rc1": "v2.8.0-rc1",
+        "v2.8.0-rc1-2": "v2.8.0-rc1",
+        # Only a trailing run, so the shape change 1.0.0 -> 1.0 stays visible.
+        "v1.0-0": "v1.0",
+        # Anchored: a build number that is not last is not a build number.
+        "v2.7.5-0-beta": "v2.7.5-0-beta",
+        # At least one digit, so a bare trailing hyphen is left alone.
+        "v2.7.5-": "v2.7.5-",
+    }
+
+    def test_strips_only_a_trailing_build_number(self):
+        for tag, want in self.CASES.items():
+            with self.subTest(tag=tag):
+                self.assertEqual(render_formula.version_of(tag), want)
+
+    def test_agrees_with_the_shell_derivation(self):
+        """The renderer and update-formula.sh must decompose a tag identically,
+        or the revision resolved here does not match the build number passed in."""
+        derive = TestTagDerivation().derive
+        for tag in self.CASES:
+            with self.subTest(tag=tag):
+                self.assertEqual(render_formula.version_of(tag).lstrip("v"), derive(tag)[0])
 
 
 class TestTagDerivation(unittest.TestCase):
