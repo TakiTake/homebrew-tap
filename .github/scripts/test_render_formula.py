@@ -4,10 +4,12 @@
 Run: python3 .github/scripts/test_render_formula.py
 """
 
+import contextlib
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,41 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SCRIPT = HERE / "update-formula.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "update-formula.yml"
+
+
+@contextlib.contextmanager
+def sourceable(*names):
+    """Expose the named bash functions, taken verbatim from the real script.
+
+    Sourcing the real definitions is the point — a copy in the test could pass
+    while the script it claims to describe had drifted.
+
+    Extraction is done here in Python and written to an ordinary file, rather
+    than `source <(sed -n …)`. That idiom is unreliable under bash 3.2, which is
+    /bin/bash on macOS and therefore what the update job runs, and it fails by
+    defining nothing at all — so every test using it reported the function as
+    "command not found" rather than pointing at the extraction. Doing the work
+    in Python also removes the GNU/BSD sed difference from the test path.
+    """
+    text = SCRIPT.read_text()
+    parts = []
+    for name in names:
+        match = re.search(
+            rf"^{re.escape(name)}\(\)\s*\{{\n.*?^\}}", text, flags=re.M | re.S
+        )
+        if not match:
+            raise AssertionError(f"{name}() not found in {SCRIPT}")
+        parts.append(match.group(0))
+
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".sh", delete=False, encoding="utf-8"
+    )
+    try:
+        handle.write("\n".join(parts) + "\n")
+        handle.close()
+        yield handle.name
+    finally:
+        os.unlink(handle.name)
 
 OLD_SHA = "a" * 64
 NEW_SHA = "b" * 64
@@ -333,22 +370,29 @@ class TestTagDerivation(unittest.TestCase):
     this cannot drift away from what actually runs."""
 
     def derive(self, tag):
-        out = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source <(sed -n "/^derive_version_and_revision()/,/^}/p" "$1"); '
-                'derive_version_and_revision "$2"; '
-                "printf '%s %s\\n' \"$new_version\" \"$new_revision\"",
-                "_",
-                str(SCRIPT),
-                tag,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
+        with sourceable("derive_version_and_revision") as functions:
+            out = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; '
+                    'derive_version_and_revision "$2"; '
+                    "printf '%s %s\\n' \"$new_version\" \"$new_revision\"",
+                    "_",
+                    functions,
+                    tag,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        # Assert rather than unpack: the sequence above ends in printf, so a
+        # function that failed to load still exits 0 and yields a blank line.
+        fields = out.stdout.split()
+        self.assertEqual(
+            len(fields), 2, f"derive produced {out.stdout!r}, stderr={out.stderr!r}"
         )
-        version, revision = out.stdout.split()
+        version, revision = fields
         return version, int(revision)
 
     def test_build_number_becomes_revision(self):
@@ -385,7 +429,7 @@ class TestTagValidation(unittest.TestCase):
             self.assertFalse(self.accepts(tag), tag)
 
     def test_rejects_tags_homebrew_reads_differently(self):
-        """Each of these is a tag where version_of and Homebrew disagree.
+        r"""Each of these is a tag where version_of and Homebrew disagree.
 
         Homebrew derives the version with StemParser(/-v?(\d[^-]+)/), which
         captures up to the NEXT HYPHEN rather than stripping a trailing build
@@ -610,19 +654,18 @@ class TestScriptGuards(unittest.TestCase):
         self.assertIn("exit 0", text[guard:use], "the no-argument branch no longer returns")
 
     def test_dry_run_is_not_truthy_for_zero(self):
-        for value, expected in (("1", 0), ("", 1), ("0", 1), ("false", 1), ("yes", 0)):
-            out = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    'source <(sed -n "/^is_true()/,/^}/p" "$1"); ' f'is_true "{value}"',
-                    "_",
-                    str(SCRIPT),
-                ],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(out.returncode, expected, f"DRY_RUN={value!r}")
+        with sourceable("is_true") as functions:
+            for value, expected in (("1", 0), ("", 1), ("0", 1), ("false", 1), ("yes", 0)):
+                out = subprocess.run(
+                    ["bash", "-c", 'source "$1"; ' f'is_true "{value}"', "_", functions],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    out.returncode,
+                    expected,
+                    f"DRY_RUN={value!r}, stderr={out.stderr!r}",
+                )
 
 
 if __name__ == "__main__":
