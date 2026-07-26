@@ -341,14 +341,22 @@ class TestTagDerivation(unittest.TestCase):
 class TestTagValidation(unittest.TestCase):
     """The regex gate that runs before a tag reaches a URL, filename or git ref."""
 
-    PATTERN = re.compile(r"^v[0-9][A-Za-z0-9.-]*$")
+    PATTERN = re.compile(r"^v[0-9]+(\.[0-9]+){1,3}(-[0-9]+)?$")
 
     def accepts(self, tag):
         return bool(self.PATTERN.match(tag))
 
     def test_accepts_real_tags(self):
-        for tag in ("v0.1.0", "v0.2.0", "v2.7.5-0", "v10.0.0-rc1"):
+        for tag in ("v0.1.0", "v0.2.0", "v2.7.5-0", "v10.0.0", "v2.7.5-12", "v1.0"):
             self.assertTrue(self.accepts(tag), tag)
+
+    def test_rejects_tags_whose_homebrew_version_is_unverified(self):
+        """The gate is narrow on purpose: render_formula.version_of has to
+        predict Homebrew's url-derived version, and only these two shapes have
+        been checked against a real brew. A prerelease reaching `brew upgrade`
+        users would be a bad outcome even if the prediction happened to hold."""
+        for tag in ("v2.8.0-rc1", "v10.0.0-rc1", "v1.1.1w", "v2.7.5-", "v2026-07-25"):
+            self.assertFalse(self.accepts(tag), tag)
 
     def test_rejects_dangerous_tags(self):
         for tag in (
@@ -367,7 +375,7 @@ class TestTagValidation(unittest.TestCase):
     def test_pattern_matches_the_script(self):
         """The gate under test must be the gate the script actually applies."""
         text = SCRIPT.read_text()
-        self.assertIn(r"^v[0-9][A-Za-z0-9.-]*$", text)
+        self.assertIn(r"^v[0-9]+(\.[0-9]+){1,3}(-[0-9]+)?$", text)
 
 
 class TestScriptGuards(unittest.TestCase):

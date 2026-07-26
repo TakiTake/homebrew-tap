@@ -99,8 +99,10 @@ def version_of(tag):
     """The version Homebrew derives from a tag: the tag minus its build number.
 
     v2.7.5-0 and v2.7.5-1 are two builds of the same version, so this is the
-    axis `revision` has to move on. A prerelease tail like -rc1 is part of the
-    version rather than a build number, so only a trailing all-digit run is cut.
+    axis `revision` has to move on. Only a trailing all-digit run is cut, so a
+    tail like -rc1 would stay part of the version — update-formula.sh's tag gate
+    rejects those shapes before they reach here, precisely because whether that
+    matches Homebrew's own derivation has not been confirmed against a real brew.
     """
     return re.sub(r"-\d+$", "", tag)
 

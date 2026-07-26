@@ -227,9 +227,19 @@ gh_api "repos/${repo}/releases/latest" >"$release_json" \
 IFS=$'\t' read -r tag _ _ < <(read_release "$release_json" "") || true
 [[ -n "${tag:-}" ]] || die "${formula}: release has no tag_name"
 
-# Validate before the tag reaches a filename, a URL, or a git ref.
-[[ "$tag" =~ ^v[0-9][A-Za-z0-9.-]*$ ]] \
-  || die "${formula}: tag '${tag}' does not match ^v[0-9][A-Za-z0-9.-]*$"
+# Validate before the tag reaches a filename, a URL, or a git ref — and keep it
+# narrow deliberately. Homebrew derives each formula's version from the url via
+# a long ordered chain of parsers, and render_formula.py has to predict that
+# derivation to decide whether a revision resets or climbs. Rather than try to
+# reimplement the chain, admit only the two shapes whose derivation has been
+# confirmed against a real `brew` — <digits.digits...> with an optional
+# `-<build>` suffix. Anything else (a prerelease tail, a date, a trailing
+# hyphen) stops the run for a human to look at, which is the right outcome
+# anyway: `releases/latest` already excludes prereleases, so such a tag arriving
+# here means something unusual happened upstream.
+readonly TAG_PATTERN='^v[0-9]+(\.[0-9]+){1,3}(-[0-9]+)?$'
+[[ "$tag" =~ $TAG_PATTERN ]] \
+  || die "${formula}: tag '${tag}' does not match ${TAG_PATTERN}"
 
 # The asset name is only knowable once the tag is, so re-read the payload now
 # that the template can be filled in. Cheap: the file is already on disk.
