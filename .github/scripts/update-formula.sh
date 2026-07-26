@@ -30,7 +30,11 @@ set -euo pipefail
 # "this run broke". Anything else must fail the job rather than read as no-op.
 readonly EXIT_NOTHING_TO_DO=100
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Assigned before `readonly`, which would otherwise mask a failing `cd` and
+# leave REPO_ROOT empty — and `cd ""` succeeds, so the script would carry on in
+# the wrong directory rather than stopping (SC2155).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
 # `gh` resolves the repository from the working directory, so anchor there
 # rather than inheriting whatever the caller happened to be in.
 cd "$REPO_ROOT"

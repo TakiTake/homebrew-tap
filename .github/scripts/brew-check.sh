@@ -14,7 +14,10 @@
 #
 set -euo pipefail
 
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Assigned before `readonly`, which would otherwise mask a failing `cd` and
+# leave REPO_ROOT empty — staging would then copy the wrong tree (SC2155).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+readonly REPO_ROOT
 # Deliberately NOT takitake/tap. That is where `brew tap takitake/tap` installs
 # the real thing, and this script begins by `rm -rf`-ing its target — run on a
 # maintainer's Mac it would replace their tap clone with a copy of the working
@@ -59,6 +62,12 @@ echo "==> staged ${count} formulae as ${TAP}"
 if [[ "$#" -eq 0 ]]; then
   # Whole tap — used by CI, where an unrelated formula that has drifted should
   # still turn the build red.
+  #
+  # Note this also lints .github/workflows with actionlint and shellcheck, since
+  # the staged tap is a copy of the whole repository. That is free coverage and
+  # has already earned its keep, but it means a `brew style` failure here can
+  # point at a YAML file rather than a formula. The named-formula path below
+  # inspects only the formula, so the update workflow is unaffected.
   brew style "$TAP" || die "brew style found offenses in ${TAP}"
   brew audit --tap "$TAP" || die "brew audit found problems in ${TAP}"
   exit 0

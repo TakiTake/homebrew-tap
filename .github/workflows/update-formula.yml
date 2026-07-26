@@ -145,7 +145,10 @@ jobs:
           set -euo pipefail
           # Pin every update branch to the commit this job checked out, so a run
           # that updates two formulae does not stack the second PR on the first.
-          export BASE_SHA="$(git rev-parse HEAD)"
+          # Assigned before exporting: `export X="$(cmd)"` returns export's own
+          # status, so a failing cmd is masked and `set -e` never fires (SC2155).
+          BASE_SHA="$(git rev-parse HEAD)"
+          export BASE_SHA
           # A string, not an array: /bin/bash here is 3.2, where `${#arr[@]}` on
           # an empty array under `set -u` aborts — which is the path taken when
           # every formula succeeds.

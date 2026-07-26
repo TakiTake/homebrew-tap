@@ -578,6 +578,24 @@ class TestScriptGuards(unittest.TestCase):
                         f"{name} is initialised empty and then expanded",
                     )
 
+    def test_no_assignment_masks_a_command_failure(self):
+        """`export X="$(cmd)"` and `readonly X="$(cmd)"` return the *declaration's*
+        status, not the command's, so `set -e` never sees the failure (SC2155).
+        The concrete bite: `readonly REPO_ROOT="$(cd … && pwd)"` with a failing cd
+        leaves REPO_ROOT empty, and `cd ""` then succeeds — the script carries on
+        against the wrong directory instead of stopping. Caught in CI by the
+        actionlint pass that `brew style` runs over the staged tap, but only for
+        workflows; this covers the scripts too."""
+        targets = sorted(HERE.glob("*.sh")) + sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        pattern = re.compile(r"^\s*(?:export|readonly|local|declare|typeset)\s+\w+=\"?\$\(", re.M)
+        for path in targets:
+            with self.subTest(file=path.name):
+                self.assertEqual(
+                    pattern.findall(path.read_text()),
+                    [],
+                    "assignment masks the command's exit status; split the declaration",
+                )
+
     def test_brew_check_guards_dollar_at_before_expanding_it(self):
         """`"$@"` with no positional parameters is also fatal under `set -u` on
         bash 3.2. brew-check.sh is safe only because the no-argument case exits
