@@ -4,6 +4,7 @@
 Run: python3 .github/scripts/test_render_formula.py
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -458,10 +459,16 @@ class TestScriptGuards(unittest.TestCase):
         self.assertLessEqual(self.script_table(), on_disk)
 
     def test_workflow_and_script_agree_on_the_formula_list(self):
-        """The list is hardcoded in three places; drift between them is silent.
+        """The list is hardcoded in several places; drift between them is silent.
 
-        A formula missing from the workflow loop is simply never checked, and
-        one missing from the dispatch options cannot be run on demand.
+        A formula missing from a workflow loop is simply never checked, and one
+        missing from the dispatch options cannot be run on demand.
+
+        There is one loop per job since the detect/update split — the detect job
+        decides what needs work and the update job acts on it, and a formula
+        present in only one of them would either never be detected or be
+        detected and then silently dropped. So every loop must carry the full
+        table, not just one of them.
         """
         text = WORKFLOW.read_text()
         loops = [
@@ -469,12 +476,120 @@ class TestScriptGuards(unittest.TestCase):
             for m in re.findall(r"for formula in ([^;]+);", text)
             if not any(c in m for c in "/*")  # skip the `Formula/*.rb` glob loop
         ]
-        self.assertEqual(len(loops), 1, "expected exactly one formula-name loop")
+        self.assertGreaterEqual(len(loops), 1, "expected a formula-name loop")
+        for loop in loops:
+            self.assertEqual(loop, self.script_table())
         block = re.search(r"^\s+options:\n((?:\s+- \S+\n)+)", text, flags=re.M).group(1)
         options = set(re.findall(r"- (\S+)", block))
-        self.assertEqual(loops[0], self.script_table())
         self.assertEqual(options - {"all"}, self.script_table())
         self.assertIn("all", options)
+
+    def test_detect_job_matches_the_scripts_nothing_to_do_status(self):
+        """The split communicates through an exit status, so both halves have to
+        agree on the number. If the script's constant moved and the workflow's
+        `100)` case did not, every up-to-date formula would be reported as a
+        failed one — an hourly red build for a no-op run."""
+        declared = re.search(
+            r"^readonly EXIT_NOTHING_TO_DO=(\d+)", SCRIPT.read_text(), flags=re.M
+        )
+        self.assertIsNotNone(declared, "script no longer declares EXIT_NOTHING_TO_DO")
+        self.assertRegex(
+            WORKFLOW.read_text(),
+            rf"(?m)^\s*{declared.group(1)}\)",
+            "the detect job does not handle the script's nothing-to-do status",
+        )
+
+    def test_only_the_brew_capable_job_asks_for_brew_validation(self):
+        """BREW_AUDIT on the ubuntu detector would abort every run: the script
+        treats a missing brew as a broken workflow, not as something to skip."""
+        text = WORKFLOW.read_text()
+        detect, update = text.split("  update:", 1)
+        self.assertIn("CHECK_ONLY=1", detect)
+        self.assertNotIn("BREW_AUDIT", detect)
+        self.assertIn("BREW_AUDIT: 1", update)
+        self.assertIn("macos", update)
+
+    def test_a_single_broken_formula_does_not_block_the_others(self):
+        """A bare `if:` implies success(), so one formula failing detection would
+        skip the update job entirely — including for formulae detect *did* find
+        updates for. A stranded branch is a hard error until a human clears it,
+        so without this the whole tap stops updating over one bad formula."""
+        gate = re.search(
+            r"^    if: (.+)$", WORKFLOW.read_text(), flags=re.M
+        )
+        self.assertIsNotNone(gate, "the update job has no `if:` gate")
+        self.assertIn(
+            "!cancelled()",
+            gate.group(1),
+            "the update job's `if:` implies success() and will skip on a partial failure",
+        )
+
+    def test_brew_audit_is_refused_where_it_cannot_apply(self):
+        """BREW_AUDIT gates the formula in the working tree, which the read-only
+        modes never write. Accepting it there would audit the *previous* contents
+        and pass — a gate that was asked for, silently did nothing, and reported
+        success."""
+        for mode in ("DRY_RUN", "CHECK_ONLY"):
+            with self.subTest(mode=mode):
+                proc = subprocess.run(
+                    [str(SCRIPT), "vpnp"],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, mode: "1", "BREW_AUDIT": "1"},
+                    cwd=str(ROOT),
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("BREW_AUDIT cannot apply", proc.stderr)
+
+    def test_mktemp_calls_pass_a_template(self):
+        """BSD mktemp requires one, and the update job now runs on macOS. Without
+        it the script dies on its first temp file, before doing anything."""
+        calls = re.findall(r"\$\(mktemp[^)]*\)", SCRIPT.read_text())
+        self.assertTrue(calls, "no mktemp calls found — has the script changed?")
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertIn("XXXXXX", call, "mktemp call has no template")
+
+    def test_no_empty_array_expansion_in_shell_run_blocks(self):
+        """`arr=()` plus `${#arr[@]}` under `set -u` aborts on bash 3.2, which is
+        /bin/bash on macOS — and the update job runs there. The failing path is
+        the one where nothing failed, so it breaks on success while passing every
+        test written on Linux.
+
+        Read this as pinning known shapes, not as proof of 3.2 compatibility.
+        Nothing in this repo executes under bash 3.2 — `validate.sh` runs
+        `bash -n` with whatever bash the runner has, and `-n` would not catch
+        this class anyway, since it is a runtime expansion error. A conditional
+        `arr+=(x)` with no empty initialiser is equally fatal and is not
+        detectable this way at all.
+        """
+        targets = sorted(HERE.glob("*.sh")) + sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        self.assertTrue(targets)
+        for path in targets:
+            text = path.read_text()
+            # No `$` anchor and `declare` included: `arr=()  # reset` and
+            # `declare -a arr=()` are the same hazard and were both missed.
+            empty = set(re.findall(r"^\s*(?:local|declare|typeset)?\s*-?a?\s*(\w+)=\(\s*\)", text, flags=re.M))
+            for name in empty:
+                with self.subTest(file=path.name, array=name):
+                    self.assertNotRegex(
+                        text,
+                        rf"\$\{{[#!]?{name}\[[@*]\]",
+                        f"{name} is initialised empty and then expanded",
+                    )
+
+    def test_brew_check_guards_dollar_at_before_expanding_it(self):
+        """`"$@"` with no positional parameters is also fatal under `set -u` on
+        bash 3.2. brew-check.sh is safe only because the no-argument case exits
+        first — an incidental guarantee that nothing else pins, so deleting that
+        early return would leave every test green and break the macOS job."""
+        text = (HERE / "brew-check.sh").read_text()
+        guard = text.find('"$#" -eq 0')
+        use = text.find('in "$@"')
+        self.assertNotEqual(guard, -1, "brew-check.sh no longer guards on $#")
+        self.assertNotEqual(use, -1, "brew-check.sh no longer iterates \"$@\"")
+        self.assertLess(guard, use, '"$@" is expanded before $# is checked')
+        self.assertIn("exit 0", text[guard:use], "the no-argument branch no longer returns")
 
     def test_dry_run_is_not_truthy_for_zero(self):
         for value, expected in (("1", 0), ("", 1), ("0", 1), ("false", 1), ("yes", 0)):

@@ -27,8 +27,9 @@ jobs:
   #
   # macOS because every formula here is `depends_on :macos`. Note this does not
   # run on the update workflow's own PRs: GitHub starts no workflow runs for
-  # pull requests opened with GITHUB_TOKEN, so for those it acts as a post-merge
-  # backstop via the push trigger above.
+  # pull requests opened with GITHUB_TOKEN. Those are covered instead by the
+  # update workflow itself, which runs the same brew-check.sh before it opens
+  # the PR; this job gates human PRs and backstops everything via push to main.
   audit:
     runs-on: macos-latest
     timeout-minutes: 20
@@ -36,25 +37,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install this checkout as a tap
-        run: |
-          set -euo pipefail
-          tap_dir="$(brew --repository)/Library/Taps/takitake/homebrew-tap"
-          # rm first: cp -R into an existing directory nests the copy one level
-          # deeper, which would leave brew auditing an empty tap and passing.
-          rm -rf "$tap_dir"
-          mkdir -p "$tap_dir"
-          cp -R "$GITHUB_WORKSPACE/." "$tap_dir/"
-
-          # brew style and brew audit both succeed on a tap with no formulae, so
-          # confirm they are about to inspect the ones we came here to check.
-          expected="$(find "$GITHUB_WORKSPACE/Formula" -name '*.rb' | wc -l | tr -d ' ')"
-          actual="$(find "$tap_dir/Formula" -name '*.rb' | wc -l | tr -d ' ')"
-          echo "formulae in tap: ${actual} (expected ${expected})"
-          [ "$actual" -gt 0 ] && [ "$actual" -eq "$expected" ]
-
-      - name: brew style
-        run: brew style TakiTake/tap
-
-      - name: brew audit
-        run: brew audit --tap TakiTake/tap
+      # No arguments: check the whole tap, so a formula that has drifted turns
+      # this red even when the PR did not touch it. The update workflow calls
+      # the same script per formula, which is how the two stay in step.
+      - name: brew style and brew audit
+        run: .github/scripts/brew-check.sh

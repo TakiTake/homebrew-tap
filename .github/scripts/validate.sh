@@ -30,8 +30,12 @@ else
   require ruby
 fi
 
-bash -n .github/scripts/update-formula.sh
-echo "ok: shell syntax"
+# Every script, not just update-formula.sh: brew-check.sh runs only on a macOS
+# runner mid-update, so a syntax error in it would otherwise first surface there.
+for script in .github/scripts/*.sh; do
+  bash -n "$script"
+  echo "ok: $script"
+done
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required to validate this repository"
 

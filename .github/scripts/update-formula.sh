@@ -7,12 +7,28 @@
 # the workflow's own GITHUB_TOKEN, scoped to this repository.
 #
 # Usage:  update-formula.sh <formula>
-# Env:    DRY_RUN=1   render and validate, but touch no git state
-#         BASE_SHA    commit every update branch is cut from (default: HEAD).
-#                     The workflow pins this once so that a run updating
-#                     several formulae does not stack one PR on top of another.
+# Env:    DRY_RUN=1     render and validate, but touch no git state
+#         CHECK_ONLY=1  as DRY_RUN, but answer a single question through the
+#                       exit status: 0 = an update is available, 100 = nothing
+#                       to do. Used by the cheap ubuntu detector half of the
+#                       two-job split, so that "is there work?" is decided by
+#                       exactly the code that would do the work — a separate
+#                       detector could drift, and the direction that matters
+#                       (detector says no, script would have said yes) is a
+#                       silently missed update. Unlike DRY_RUN it does query
+#                       for existing PRs, or an open PR would re-trigger the
+#                       expensive half every hour.
+#         BREW_AUDIT=1  additionally gate the rendered formula on brew style
+#                       and brew audit. Needs a runner with brew.
+#         BASE_SHA      commit every update branch is cut from (default: HEAD).
+#                       The workflow pins this once so that a run updating
+#                       several formulae does not stack one PR on top of another.
 #
 set -euo pipefail
+
+# Distinct from `die`'s 1, so the detector can tell "nothing to do" apart from
+# "this run broke". Anything else must fail the job rather than read as no-op.
+readonly EXIT_NOTHING_TO_DO=100
 
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # `gh` resolves the repository from the working directory, so anchor there
@@ -31,6 +47,26 @@ is_true() {
 }
 
 if is_true "${DRY_RUN:-}"; then dry_run=1; else dry_run=0; fi
+if is_true "${CHECK_ONLY:-}"; then check_only=1; else check_only=0; fi
+
+# Mutually exclusive rather than "one of them wins": set together, DRY_RUN's
+# shortcut in skip_if_already_handled would suppress the existing-PR check while
+# CHECK_ONLY still reported an update as available — work pending for a branch
+# whose PR is already open.
+if [[ "$dry_run" -eq 1 && "$check_only" -eq 1 ]]; then
+  die "set DRY_RUN or CHECK_ONLY, not both: they disagree about whether to check for an existing PR"
+fi
+# Both modes stop short of touching git; they differ only in what they report.
+no_git=0
+if [[ "$dry_run" -eq 1 || "$check_only" -eq 1 ]]; then no_git=1; fi
+
+# The brew gate inspects the formula in the working tree, which the read-only
+# modes deliberately never write. Asking for it here would render, pass, and
+# report success having audited the *previous* formula — a false green from a
+# gate that was requested and silently did not run. Refuse instead.
+if [[ "$no_git" -eq 1 ]] && is_true "${BREW_AUDIT:-}"; then
+  die "BREW_AUDIT cannot apply in a read-only mode: it gates the formula in the working tree, which DRY_RUN and CHECK_ONLY do not touch. Drop BREW_AUDIT, or run .github/scripts/brew-check.sh directly."
+fi
 
 # --- hardcoded formula table -------------------------------------------------
 # Never derived from workflow input. Adding a formula is a reviewed commit here.
@@ -60,14 +96,19 @@ formula_config() {
 # --- helpers -----------------------------------------------------------------
 gh_api() {
   local url="https://api.github.com/$1"
-  local -a auth=()
+  # Built as one never-empty array rather than a separate `auth` array that is
+  # empty when unauthenticated: expanding an empty array under `set -u` is an
+  # error in bash 3.2, which is what /bin/bash is on macOS — and this script now
+  # runs there.
+  local -a curl_args=(
+    -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300
+    -H "Accept: application/vnd.github+json"
+    -H "X-GitHub-Api-Version: 2022-11-28"
+  )
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
-  curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "${auth[@]}" "$url"
+  curl "${curl_args[@]}" "$url"
 }
 
 # Syntax-check the rendered formula. Required everywhere except a local dry run
@@ -78,11 +119,28 @@ validate_ruby() {
     ruby -c "$1" >/dev/null
     return
   fi
-  if [[ "$dry_run" -eq 1 && -z "${CI:-}" ]]; then
-    log "==> warning: ruby not found, skipping syntax check (dry run)"
+  # Either read-only mode, run by hand on a machine without ruby. Still gated on
+  # CI being unset, so the check never degrades where it is load-bearing.
+  if [[ "$no_git" -eq 1 && -z "${CI:-}" ]]; then
+    log "==> warning: ruby not found, skipping syntax check (read-only run)"
     return 0
   fi
   die "ruby is required to validate the rendered formula"
+}
+
+# Homebrew-level validation, on top of `ruby -c`. A syntax check proves the file
+# parses; brew style and brew audit understand component order, dependency order
+# and deprecated APIs that it cannot see. Off by default so the ubuntu detector
+# and local dry runs stay cheap; the macOS half of the split sets BREW_AUDIT=1,
+# and there a missing brew is a broken workflow rather than a reason to skip.
+# Called after the formula has been rewritten, so brew-check.sh re-stages the
+# tap from the working tree each time — a stale copy would audit the previous
+# contents and pass.
+validate_brew() {
+  is_true "${BREW_AUDIT:-}" || return 0
+  log "==> ${formula}: brew style / brew audit"
+  "${REPO_ROOT}/.github/scripts/brew-check.sh" "$formula" \
+    || die "${formula}: Homebrew rejected the rendered formula"
 }
 
 sha256_of() {
@@ -136,6 +194,7 @@ formula_revision() {
 
 up_to_date() {
   log "==> ${formula}: $1"
+  [[ "$check_only" -eq 1 ]] && exit "$EXIT_NOTHING_TO_DO"
   exit 0
 }
 
@@ -145,6 +204,8 @@ up_to_date() {
 # fail closed, so a transient API error is never read as "nothing exists".
 skip_if_already_handled() {
   local candidate="$1" existing_pr ls_rc=0
+  # Deliberately not skipped under CHECK_ONLY: an open PR is exactly the case
+  # the detector exists to suppress.
   [[ "$dry_run" -eq 1 ]] && return 0
 
   if ! existing_pr="$(gh pr list --state all --head "$candidate" --json number \
@@ -186,12 +247,13 @@ formula_path="${REPO_ROOT}/Formula/${formula}.rb"
 # The update path rewrites git state and its recovery paths use
 # `checkout --force`. Refuse to run on top of someone's unsaved work — and check
 # before doing any network work, so the failure is immediate and obvious.
-if [[ "$dry_run" -eq 0 ]] && ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
+if [[ "$no_git" -eq 0 ]] && ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
   die "${formula}: working tree has uncommitted changes; refusing to touch git state (use DRY_RUN=1)"
 fi
 
-release_json="$(mktemp)"
-workdir="$(mktemp -d)"
+# Explicit templates: BSD mktemp wants one, and this now runs on macOS too.
+release_json="$(mktemp "${TMPDIR:-/tmp}/update-formula.XXXXXX")"
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/update-formula.XXXXXX")"
 
 # Set once, and covers every exit path. `orig_ref` is set only once the
 # git-mutating section starts, so before that this degrades to removing the
@@ -322,10 +384,18 @@ render() {
   python3 "${REPO_ROOT}/.github/scripts/render_formula.py" "$1" "$2"
 }
 
-if [[ "$dry_run" -eq 1 ]]; then
+if [[ "$no_git" -eq 1 ]]; then
   render "$formula_path" "${workdir}/rendered.rb" || die "${formula}: render failed"
   validate_ruby "${workdir}/rendered.rb" \
     || die "${formula}: rendered formula is not valid Ruby"
+  # Rendering is the last thing that can rule an update out, so only report one
+  # as available once it has actually produced a valid formula. brew validation
+  # is deliberately not run here: the detector has no brew, and re-checking on
+  # the macOS half is the point of the split.
+  if [[ "$check_only" -eq 1 ]]; then
+    log "==> ${formula}: an update to ${tag} is available"
+    exit 0
+  fi
   log "==> ${formula}: would update to ${tag} (dry run)"
   diff -u "$formula_path" "${workdir}/rendered.rb" || true
   exit 0
@@ -347,6 +417,9 @@ render "$formula_path" "${workdir}/rendered.rb" || die "${formula}: render faile
 cp "${workdir}/rendered.rb" "$formula_path"
 
 validate_ruby "$formula_path" || die "${formula}: rendered formula is not valid Ruby"
+# Before the commit, so a formula brew rejects never becomes a PR at all. This
+# is the whole reason the expensive half of the split runs on macOS.
+validate_brew
 
 if git -C "$REPO_ROOT" diff --quiet -- "Formula/${formula}.rb"; then
   log "==> ${formula}: render produced no change, nothing to do"
@@ -366,6 +439,15 @@ fi
 sha_note="computed from the downloaded asset"
 if [[ "$has_sha256_asset" -eq 1 ]]; then
   sha_note="${sha_note}, and matches the \`.sha256\` published alongside it"
+fi
+
+# The PR page will show no checks at all (see the body below), so spell out what
+# did run — otherwise "no checks" reads as "unchecked".
+checks_note="ran \`validate.sh\` against the base commit and syntax-checked the rendered formula"
+if is_true "${BREW_AUDIT:-}"; then
+  # No "on macOS" here: this is keyed on BREW_AUDIT, which says nothing about
+  # the OS, and a local run would then write a claim about a runner into the PR.
+  checks_note="${checks_note}, then gated it on \`brew style\` and \`brew audit\` before committing"
 fi
 
 git -C "$REPO_ROOT" add "Formula/${formula}.rb"
@@ -388,10 +470,9 @@ metadata on a schedule. The checksum above confirms the download was not
 corrupted in transit; it is not a proof of upstream authenticity.
 
 GitHub does not start workflow runs for pull requests opened by \`GITHUB_TOKEN\`,
-so this PR shows no checks. The job that opened it ran \`validate.sh\` against the
-base commit and syntax-checked the rendered formula above. Please review before
-merging: this is the last checkpoint before the change reaches \`brew upgrade\`
-users."
+so this PR shows no checks. That is not the same as unchecked — the workflow run
+that opened it ${checks_note}. Please review before merging: this is the last
+checkpoint before the change reaches \`brew upgrade\` users."
 
 pushed=0
 log "==> ${formula}: opened PR for ${tag}"
