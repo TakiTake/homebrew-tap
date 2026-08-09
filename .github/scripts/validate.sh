@@ -55,3 +55,13 @@ else
 fi
 
 python3 .github/scripts/test_render_formula.py
+
+# Hard in CI like the ruby check, not soft like the PyYAML one: a missing jq
+# does not merely lose an earlier error message here, it silently drops a test
+# suite. jq is a dependency of that suite alone — `gh --jq` in the script under
+# test uses gh's own built-in jq, so nothing in a real run needs this.
+if command -v jq >/dev/null 2>&1; then
+  .github/scripts/test_rerun_unacquired.sh
+else
+  require jq
+fi
