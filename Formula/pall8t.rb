@@ -1,8 +1,8 @@
 class Pall8t < Formula
   desc "Run AI coding agents in apple/container sandboxes"
   homepage "https://github.com/TakiTake/pall8t"
-  url "https://github.com/TakiTake/pall8t/releases/download/v0.3.0/pall8t-v0.3.0-aarch64-apple-darwin.tar.gz"
-  sha256 "7080d0ef166b31ec7d54915ffd1772ed09534b5437e7321a2daf773734d2f593"
+  url "https://github.com/TakiTake/pall8t/releases/download/v0.4.0/pall8t-v0.4.0-aarch64-apple-darwin.tar.gz"
+  sha256 "1b84a08bc027be11a878a5405eb5f08e38dd78065906ff9346d0f0577a02f061"
   license "MIT"
 
   depends_on arch: :arm64
