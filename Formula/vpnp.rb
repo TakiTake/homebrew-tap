@@ -1,8 +1,8 @@
 class Vpnp < Formula
   desc "AWS Client VPN on macOS without breaking apple/container"
   homepage "https://github.com/TakiTake/vpnp"
-  url "https://github.com/TakiTake/vpnp/releases/download/v0.2.0/vpnp-v0.2.0-aarch64-apple-darwin.tar.gz"
-  sha256 "467305b1d06db85c123223f561172e976f8d054b88768e3e0d4c9dde12285981"
+  url "https://github.com/TakiTake/vpnp/releases/download/v0.2.1/vpnp-v0.2.1-aarch64-apple-darwin.tar.gz"
+  sha256 "0bf95d83d2210b735e7d981ba1cb3fd029558b4cae6896058551e3de2fd91298"
   license "MIT"
 
   depends_on arch: :arm64
