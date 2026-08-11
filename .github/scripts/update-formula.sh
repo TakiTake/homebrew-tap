@@ -84,7 +84,8 @@ formula_config() {
     vpnp)
       repo="TakiTake/vpnp"
       asset_template="vpnp-@TAG@-aarch64-apple-darwin.tar.gz"
-      has_sha256_asset=0
+      # Since v0.2.1 (vpnp#3) every release ships the .sha256 sidecar.
+      has_sha256_asset=1
       ;;
     openvpn-aws)
       repo="TakiTake/openvpn-aws"
