@@ -1,9 +1,10 @@
 class OpenvpnAws < Formula
   desc "OpenVPN with raised buffers for AWS Client VPN SAML federation"
   homepage "https://github.com/TakiTake/openvpn-aws"
-  url "https://github.com/TakiTake/openvpn-aws/releases/download/v2.7.6-0/openvpn-aws-v2.7.6-0-aarch64-apple-darwin.tar.gz"
-  sha256 "84b2acaead821816614108a17bbad5c9cad751716e6247c0702d98d62c8d3cbe"
+  url "https://github.com/TakiTake/openvpn-aws/releases/download/v2.7.7-1/openvpn-aws-v2.7.7-1-aarch64-apple-darwin.tar.gz"
+  sha256 "52c05e9ee02bb10dd2dd1bea4b22dfffe41cdccc6d195c0644ca9b0ea51820e2"
   license "GPL-2.0-only"
+  revision 1
 
   depends_on arch: :arm64
   depends_on :macos
